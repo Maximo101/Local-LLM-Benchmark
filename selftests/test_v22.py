@@ -164,7 +164,7 @@ def test_toolcall_cases_are_consistent():
             assert exp["name"] in c["tools"] and set(exp["args"]) <= set(props), c["id"]
             required = TOOLS[exp["name"]]["function"]["parameters"]["required"]
             assert all(None not in exp["args"].get(r, [0]) for r in required), c["id"]
-    assert {c["category"] for c in CASES} == {"simple", "multiple", "parallel", "irrelevance"}
+    assert {c["category"] for c in CASES} == {"simple", "multiple", "parallel", "irrelevance", "missing", "chained"}
 
 
 # --------------------------------------------------------------------------- long context

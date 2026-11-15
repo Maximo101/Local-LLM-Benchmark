@@ -33,7 +33,7 @@ TYPICAL_TOK = {"gpqa": (10000, 700), "mmlu_pro": (4400, 450), "humaneval": (2800
                "livecodebench": (12000, 900), "gsm8k": (2000, 250), "math": (5500, 600), "toolcall": (130, 130)}
 THINKING_SHARE = 0.9          # share of models assumed to think, when nothing is known
 AVAILABLE = {"gpqa": 198, "mmlu_pro": 12032, "humaneval": 164, "mbpp": 500, "livecodebench": 1055, "gsm8k": 1319,
-             "math": 500, "toolcall": 32}
+             "math": 500, "toolcall": 96}          # tool calling: the built-in pool (v2.3.6; 32 before)
 SANDBOX_S = 1.5               # seconds per program run in Docker (hidden by pipelined grading in v2.1)
 FUNNEL_SURVIVE = 0.5          # share of models assumed to pass each funnel gate (a crowded field keeps more)
 
@@ -268,6 +268,18 @@ def _stage_shape(cfg, n_models):
     return out
 
 
+def _key_shape(cfg, key, k, shape):
+    """The stage shape of one dataset: a "full" dataset is asked in full at the first stage; one with "min_rows"
+    (tool calling, v2.3.6) asks max(min_rows, stage rows) at each stage, so its first stage is a larger share."""
+    spec = EVAL_SPECS.get(key, {})
+    if spec.get("full"):
+        return [(1.0, 1.0)]
+    if not spec.get("min_rows") or cfg.eval_profile != "funnel" or not k:
+        return shape
+    rows = [r for _, r in funnel_stages(cfg)]
+    return [(min(1.0, (rows_for(key, r) or k) / k), alive) for r, (_, alive) in zip(rows, shape)]
+
+
 def _uncached_work(shape, cached_share):
     """Expected share of a dataset's final rows this model will be asked, with the first `cached_share` of the rows
     already answered (nested sampling: every profile is a prefix of one question order, so cached answers from
@@ -342,7 +354,7 @@ def estimate(cfg, brief=False):
         ev, cached_n, planned_n, recheck = 0.0, 0, 0, 0.0
         for key, k, spq in e.get("_ev") or []:
             c = min(k, (cache.get(m) or {}).get(key, 0))
-            sh = [(1.0, 1.0)] if EVAL_SPECS[key].get("full") else shape     # asked in full at the first stage
+            sh = _key_shape(cfg, key, k, shape)
             share = _uncached_work(sh, c / k if k else 0.0)
             ev += k * spq * share
             exp_rows = k * _uncached_work(sh, 0.0)               # expected rows asked with an empty cache

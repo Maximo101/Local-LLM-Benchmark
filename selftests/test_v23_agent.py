@@ -225,16 +225,17 @@ def test_speed_factor_weights(cfg):
     assert speed_factor(only, cfg) == pytest.approx(1.0)
 
 
-# --------------------------------------------------------------------------- tool calling in full at every stage
-def test_tool_calling_runs_in_full_at_every_stage(cfg):
+# --------------------------------------------------------------------------- tool calling at every stage
+def test_tool_calling_runs_at_every_stage(cfg):
+    """v2.3: every case at every stage. v2.3.6: at least the 32 core cases at every stage, more as the rows grow."""
     from llmbench.evals.datasets import prepare_eval_data
     from llmbench.evals.runner import _stage_ids
     cfg.eval_profile, cfg.eval_funnel_final, cfg.eval_datasets = "funnel", "moderate", ("toolcall",)
-    assert rows_for("toolcall", 11) is None and rows_for("mmlu_pro", 11) == 11
+    assert rows_for("toolcall", 11) == 32 and rows_for("mmlu_pro", 11) == 11
     data = prepare_eval_data(cfg)
-    assert len(data["toolcall"]) == 32
+    assert len(data["toolcall"]) == 43
     ids = _stage_ids(cfg, data, funnel_stages(cfg))["toolcall"]
-    assert [len(s) for s in ids] == [32, 32, 32]
+    assert [len(s) for s in ids] == [32, 32, 43]
 
 
 # --------------------------------------------------------------------------- the funnel gate ranks on the composite

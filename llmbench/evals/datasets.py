@@ -83,10 +83,13 @@ def question_order(candidates, seed, key):
 
 def sample_indices(n, k, seed, key, candidates=None):
     """Deterministic, nested sample: the first k of question_order(), sorted. Every model sees exactly the same rows.
-    `candidates` restricts the pool (e.g. LiveCodeBench problems after EVAL_LCB_SINCE)."""
+    `candidates` restricts the pool (e.g. LiveCodeBench problems after EVAL_LCB_SINCE). A dataset marked "ordered"
+    (the built-in tool cases, v2.3.6) is not shuffled: k rows are its first k, so the core set always comes first."""
     pool = list(range(n)) if candidates is None else list(candidates)
     if k is None or k >= len(pool):
         return sorted(pool)
+    if EVAL_SPECS.get(key, {}).get("ordered"):
+        return sorted(pool[:k])
     return sorted(question_order(pool, seed, key)[:k])
 
 

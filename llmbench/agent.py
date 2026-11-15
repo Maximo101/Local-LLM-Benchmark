@@ -14,7 +14,7 @@ all (it failed, or its KV was below LONGCTX_KV_MIN with LONGCTX_KV_ACTION=skip),
 model's composite for this run and the reason is reported (the "basis" text).
 
 The composite's standard error combines the binomial error of each part (weights squared), so the tie zone reflects
-the real noise of what is ranked: tool calling has only 32 cases (+/-17 points) and long-ctx 8 keys per length.
+the real noise of what is ranked: tool calling has 32 to 96 cases (+/-17 to +/-10 points) and long-ctx 8 keys per length.
 
 Context (usable_ctx): the context a model can actually work with, not just the one it was loaded with. Walking the
 long-context lengths of the run upwards, every length that fits the loaded context must reach AGENT_CTX_PASS_PCT

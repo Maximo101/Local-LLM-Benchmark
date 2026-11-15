@@ -61,7 +61,7 @@ def demo_results(cfg):
             r[f"eval_{key}_degr"] = rng.choice([0, 0, 0, 1, 3])
             r[f"eval_{key}_sec"] = round(rng.uniform(8, 60) * (150 / tps) * (3 if key == "gpqa" else 1), 1)
             r[f"eval_{key}_fallback"] = rng.choice([0, 0, 1, 2, 25])
-        r["eval_toolcall_pct"], r["eval_toolcall_n"] = 60 + 40 * q * rng.uniform(0.8, 1.0), 32
+        r["eval_toolcall_pct"], r["eval_toolcall_n"] = 60 + 40 * q * rng.uniform(0.8, 1.0), 50
         # v2.1: where the time went (seconds per phase) and eval tokens, so the timing section has something to show
         think = rng.choice([0.0, 0.6, 0.8])
         r["timing"] = {"settle": 5.0, "load": r["load_s"], "speed": 900 / tps * 3, "prefill_ctx": 80000 / (tps * 9),
@@ -78,7 +78,7 @@ def demo_results(cfg):
                      "humaneval": {"rows": 50, "available": 164}, "mbpp": {"rows": 50, "available": 500},
                      "livecodebench": {"rows": 50, "available": 1055},
                      "gsm8k": {"rows": 50, "available": 1319}, "math": {"rows": 50, "available": 500},
-                     "toolcall": {"rows": 32, "available": 32}}
+                     "toolcall": {"rows": 50, "available": 96}}
     cfg.eval_longctx = True
     cfg.longctx_lengths = (65536, 131072)
     cfg.prefill_ctx_tests = (8192, 32768, 65536)

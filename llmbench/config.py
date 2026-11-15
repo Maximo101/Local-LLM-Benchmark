@@ -230,11 +230,12 @@ EVAL_SPECS = {
                       "repo": "HuggingFaceH4/MATH-500",               "split": "test"},
     # Built into the tool (llmbench/evals/toolcall_cases.py), nothing to download. BFCL-style: native OpenAI `tools`
     # requests, graded by matching the function name and arguments (AST-style), including "should not call" cases.
-    "toolcall":      {"desc": "32 built-in function-calling cases sent as OpenAI 'tools' requests: pick the right tool, fill its arguments, call several tools at once, or correctly call none. Graded on the function name and arguments. Tests agent readiness.", "label": "Tool calling",  "short": "Tools",     "kind": "tool", "env": "EVAL_TOOLCALL",
+    "toolcall":      {"desc": "96 built-in function-calling cases sent as OpenAI 'tools' requests: pick the right tool among close ones, fill its arguments, call several tools at once, use an earlier tool result for the next call, or correctly call none (no fitting tool, or a required value the user did not give). Graded on the function name and arguments. At least 32 cases at every profile and funnel stage, more as the profile grows (43 at moderate, all 96 from standard). Tests agent readiness.", "label": "Tool calling",  "short": "Tools",     "kind": "tool", "env": "EVAL_TOOLCALL",
                       "repo": "builtin",                              "split": "test", "builtin": True,
-                      # v2.3: always every case, at every profile and funnel stage (cheap: ~130 tokens a case), so
-                      # MIN_TOOLCALL_PCT and the Agent composite's tool part always see all 32 cases
-                      "full": True},
+                      # v2.3.6: never fewer than the first TOOL_MIN_CASES cases (so MIN_TOOLCALL_PCT is decided on the
+                      # same 32 at the first funnel stage), more when a stage asks more rows; asked in list order
+                      # ("ordered"), so a stage is always a prefix and the first 32 are the v2.3 set
+                      "min_rows": 32, "ordered": True},
 }
 # Rows per active dataset. Sizes come from n = 0.9604 / E^2 (95% confidence, worst-case variance), where E is the
 # margin of error shown in brackets. A dataset smaller than the profile is used in full (e.g. GPQA has 198 rows).
@@ -314,9 +315,18 @@ def funnel_stages(cfg):
     return out
 
 
+TOOL_MIN_CASES = 32        # v2.3.6: tool calling never asks fewer cases than this (the v2.3 core set)
+
+
 def rows_for(key, rows):
-    """Rows of dataset `key` at a stage of `rows` rows: datasets marked "full" (tool calling) always run in full."""
-    return None if EVAL_SPECS.get(key, {}).get("full") else rows
+    """Rows of dataset `key` at a stage of `rows` rows (None = every row). A dataset marked "full" always runs in full;
+    one with "min_rows" (tool calling, v2.3.6) runs at least that many, more when the stage asks more."""
+    spec = EVAL_SPECS.get(key, {})
+    if spec.get("full"):
+        return None
+    if rows is not None and spec.get("min_rows"):
+        return max(spec["min_rows"], rows)
+    return rows
 
 
 def stage_rows(cfg):

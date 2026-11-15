@@ -29,12 +29,19 @@ v2.3.3: TWO THINGS CHANGED (with a Config)
      usable context below AGENT_CTX_MIN, tool calling below MIN_TOOLCALL_PCT: agent.exclusion) is not "a weaker
      model that lost the ranking": it fails a rule. It is labelled "No Agent score", never "Screened out", it is not
      counted when the leaders' bar is set, and with EVAL_HARD_FAIL=stop (default) it is not asked further stages.
-  2. THE BOUNDS USE THE REDUCIBLE ERROR ONLY. The tool-calling (32 cases) and long-context (8 per length) parts of the
-     composite are asked in full at the first stage; more stages do not shrink their error, so counting it in a gate
-     only kept every model alive (v2.3.1 real runs: 1 of 26 pruned). The gate now uses the error of the evals part
-     (which does shrink with every stage) plus a margin of EVAL_FUNNEL_MARGIN points:
+  2. THE BOUNDS USE THE REDUCIBLE ERROR ONLY. The long-context part (8 per length) is asked in full at the first
+     stage; more stages do not shrink its error, so counting it in a gate only kept every model alive (v2.3.1 real
+     runs: 1 of 26 pruned). The gate now uses the error of the evals part (which does shrink with every stage) plus a
+     margin of EVAL_FUNNEL_MARGIN points:
 
          keep  <=>  score + z x SE_evals + margin  >=  (score - z x SE_evals) of the EVAL_LEADERS-th best model
+
+v2.3.6: TOOL CALLING GROWS WITH THE STAGES. It used to be asked in full (32 cases) at the first stage, like long-context.
+  It now asks max(32, stage rows) of 96 cases, so a later stage CAN shrink its error. While the final stage will ask
+  a model more tool cases than it has answered, the tool part's error is counted with the evals part's (in
+  quadrature, weighted as in the composite): leaving it out would make the gate surer than the data. That widens the
+  bounds a little (the safe side: more models kept). Once the tool cases are complete (a final of basic or lower, or
+  the final stage itself) the rule is the v2.3.3 one.
 """
 from __future__ import annotations
 
@@ -103,15 +110,32 @@ def composite_estimates(rows, keys, cfg):
     return est, text
 
 
+def tool_cases_final(cfg):
+    """Tool-calling cases the run's final stage asks (v2.3.6), or None when that cannot be told (no Config fields)."""
+    from ..agent import TOOL_KEY
+    from ..config import rows_for, stage_rows
+    try:
+        pool = ((getattr(cfg, "eval_pools", None) or {}).get(TOOL_KEY) or (None,))[0]
+        if not pool:
+            from .toolcall_cases import CASES
+            pool = len(CASES)
+        k = rows_for(TOOL_KEY, stage_rows(cfg))
+    except (AttributeError, KeyError, TypeError, SystemExit):
+        return None
+    return pool if k is None else min(pool, k)
+
+
 def composite_estimates_red(rows, keys, cfg):
-    """As composite_estimates, plus {model: reducible standard error}: the error of the evals part alone, weighted
-    as in the composite (the part more questions can still shrink)."""
+    """As composite_estimates, plus {model: reducible standard error}: the error of the evals part, weighted as in the
+    composite (the part more questions can still shrink), plus (v2.3.6) the tool part's while the final stage will
+    ask that model more tool cases than it has answered."""
     from .. import agent
     complete = [r for r in rows if _complete(r, keys)]
     _, has_tools = agent.eval_keys(rows)
     rankable = [r for r in complete if not agent.exclusion(r, cfg, has_tools)]
     b = agent.basis(cfg, rankable or complete, rows)
     est, red = {}, {}
+    tools_final = tool_cases_final(cfg)
     for r in rows:
         if r not in complete:
             est[r["model"]] = None
@@ -125,7 +149,14 @@ def composite_estimates_red(rows, keys, cfg):
         est[r["model"]] = e
         w_ev = b["weights"].get("evals")
         ev = agent.composite(r, {"evals": w_ev}, b["ekeys"], False, [], b["lc_n"], _se_pct) if w_ev else None
-        red[r["model"]] = ev[1] if ev else (e[1] if e else None)
+        sr = ev[1] if ev else (e[1] if e else None)
+        w_t = b["weights"].get("tools")
+        n_t = r.get(f"eval_{agent.TOOL_KEY}_n") or 0
+        if sr is not None and w_t and tools_final and n_t and n_t < tools_final:
+            tp = agent.composite(r, {"tools": w_t}, b["ekeys"], True, [], b["lc_n"], _se_pct)
+            if tp:
+                sr = (sr * sr + tp[1] * tp[1]) ** 0.5
+        red[r["model"]] = sr
     return est, b["text"], red
 
 

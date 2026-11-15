@@ -132,6 +132,7 @@ footer{margin-top:40px}
 <div id="evsec" hidden>
 <h2>Accuracy &amp; pass rates</h2>
 <div class="sub" id="evsub"></div>
+<div class="sub" id="evearly" hidden style="margin-top:6px"></div>
 <div class="grid charts" id="evcharts" style="margin-top:12px"></div>
 </div>
 
@@ -188,7 +189,8 @@ const VIEW = (() => { let v = {}; try { v = JSON.parse(localStorage.getItem(VIEW
           mode: ['absolute','relative'].includes(v.mode) ? v.mode : (C.mode || 'absolute'),
           pattern: typeof v.pattern === 'string' ? v.pattern : '',
           fmin: typeof v.fmin === 'boolean' ? v.fmin : null,          // filter bar folded (null = by screen width)
-          lb: ['score','quality'].includes(v.lb) ? v.lb : 'score'}; })();
+          lb: ['score','quality'].includes(v.lb) ? v.lb : 'score',
+          evearly: v.evearly === true}; })();          // v2.3.6: show early-stopped funnel models in the accuracy charts
 const saveView = () => { try { localStorage.setItem(VIEWSTORE, JSON.stringify(VIEW)); } catch(e){} };
 const OSDARK = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null;
 const themeNow = () => VIEW.theme==='auto' ? (OSDARK && !OSDARK.matches ? 'light' : 'dark') : VIEW.theme;
@@ -560,19 +562,24 @@ const evLabels = {id:'evLabels', afterDatasetsDraw(chart){
 const evMean = (m, ds) => { const v = ds.map(e=>evPct(m,e)).filter(x=>x!=null); return v.length ? v.reduce((s,x)=>s+x,0)/v.length : -1; };
 function renderEvalCharts(OKR){
   if (!EV.length && !LCL.length) return;
+  // v2.3.6: models that stopped at an earlier funnel stage are left out (or shown faded) - see evEarly()
+  const early = OKR.filter(evEarly), EVR = VIEW.evearly ? OKR : OKR.filter(m=>!evEarly(m));
+  renderEarlyNote(early);
+  const fade = (m, col) => evEarly(m) ? col+'40' : col;
   EVKINDS.forEach(([kind])=>{
     const key = 'ev'+kind, ds = EV.filter(e=>e.kind===kind);
-    const items = OKR.filter(m=>ds.some(e=>evPct(m,e)!=null)).sort((a,b)=>evMean(b,ds)-evMean(a,ds));
+    const items = EVR.filter(m=>ds.some(e=>evPct(m,e)!=null)).sort((a,b)=>(evEarly(a)-evEarly(b)) || (evMean(b,ds)-evMean(a,ds)));
     if (!box(key, items, Math.max(380, items.length*(ds.length*15+14)+100))) return;
     mk('c_'+key, {type:'bar', plugins:[evLabels],
       data:{labels:items.map(m=>m.model), datasets:ds.map(e=>{ const col = EVPAL[EV.indexOf(e)%EVPAL.length];
-        return {label:e.label, data:items.map(m=>evPct(m,e)), backgroundColor:col, borderColor:col, borderWidth:1}; })},
+        return {label:e.label, data:items.map(m=>evPct(m,e)), backgroundColor:items.map(m=>fade(m,col)), borderColor:items.map(m=>fade(m,col)), borderWidth:1}; })},
       options:{indexAxis:'y', plugins:{legend:{display:true}, tooltip:{callbacks:{label:c=>{
           const m = items[c.dataIndex], e = ds[c.datasetIndex], p = evPct(m,e), n = evN(m,e);
           const na = m['eval_'+e.key+'_na']||0, dg = m['eval_'+e.key+'_degr']||0, sq = m['eval_'+e.key+'_sec'];
           const fb = m['eval_'+e.key+'_fallback']||0, mo = MOE && MOE.per_dataset[e.key];
-          return p==null ? `${e.label}: not run` : `${e.label}: ${p.toFixed(1)}%${mo?` \u00b1${mo.moe.toFixed(0)}`:''} (${Math.round(p*n/100)}/${n} correct${na?`, ${na} N/A`:''}${fb?`, ${fb} retried`:''}${dg?`, ${dg} Fail: Degradation`:''}${sq!=null?`, ${sq.toFixed(1)} s/question`:''})`; }}}},
-        scales:{x:{min:0, max:112, ticks:{callback:v=>v<=100?v+'%':''}, title:axTitle(kind==='code'?'pass@1 (%)':'accuracy (%)')}, y:{ticks:yTicks}}}});
+          return p==null ? `${e.label}: not run` : `${e.label}: ${p.toFixed(1)}%${mo&&!evEarly(m)?` \u00b1${mo.moe.toFixed(0)}`:''} (${Math.round(p*n/100)}/${n} correct${na?`, ${na} N/A`:''}${fb?`, ${fb} retried`:''}${dg?`, ${dg} Fail: Degradation`:''}${sq!=null?`, ${sq.toFixed(1)} s/question`:''})`; },
+          afterBody:cs=>{ const m = cs.length ? items[cs[0].dataIndex] : null; return m && evEarly(m) ? [earlyTip(m)] : []; }}}},
+        scales:{x:{min:0, max:112, ticks:{callback:v=>v<=100?v+'%':''}, title:axTitle(kind==='code'?'pass@1 (%)':'accuracy (%)')}, y:{ticks:yTicksEarly(items)}}}});
   });
   if (LCL.length){
     const lp = OKR.filter(m=>LCL.some(l=>m['longctx_'+l+'_pct']!=null) || m.longctx_note).sort((a,b)=>(b.longctx_avg_pct??-1)-(a.longctx_avg_pct??-1));
@@ -585,12 +592,13 @@ function renderEvalCharts(OKR){
           scales:{x:{min:0, max:112, ticks:{callback:v=>v<=100?v+'%':''}, title:axTitle('keys retrieved (%)')}, y:{ticks:yTicks}}}});
     }
   }
-  const sp = OKR.filter(m=>m.eval_avg_pct!=null && m.avg_tps!=null);
+  const sp = EVR.filter(m=>m.eval_avg_pct!=null && m.avg_tps!=null);
   if (box('evspeed', sp, 420)){
     mk('c_evspeed', {type:'scatter', plugins:[hlPoints],
       data:{datasets:[{clip:false, data:sp.map(m=>pt(m,m.eval_avg_pct,m.avg_tps)), pointRadius:7, pointHoverRadius:10,
-        backgroundColor:sp.map(m=>tpsColor(m.avg_tps)+'cc'), borderColor:sp.map(m=>tpsColor(m.avg_tps))}]},
-      options:{layout:{padding:{right:14}}, plugins:{legend:{display:false}, tooltip:{callbacks:{label:c=>`${c.raw.name}: ${c.raw.x.toFixed(1)}% avg score, ${c.raw.y.toFixed(1)} tok/s`}}},
+        backgroundColor:sp.map(m=>tpsColor(m.avg_tps)+(evEarly(m)?'33':'cc')), borderColor:sp.map(m=>tpsColor(m.avg_tps)+(evEarly(m)?'66':''))}]},
+      options:{layout:{padding:{right:14}}, plugins:{legend:{display:false}, tooltip:{callbacks:{label:c=>{ const m = sp[c.dataIndex];
+          return `${c.raw.name}: ${c.raw.x.toFixed(1)}% avg score, ${c.raw.y.toFixed(1)} tok/s` + (m && evEarly(m) ? ` (${earlyTip(m)})` : ''); }}}},
         scales:{x:{...fitAxis(sp.map(m=>m.eval_avg_pct), 0, 100), title:axTitle('Average score over '+EV.map(e=>e.short).join(', ')+' (%)')},
                 y:{...fitAxis(sp.map(m=>m.avg_tps), 0), title:axTitle('Avg tok/s')}}}});
   }
@@ -650,6 +658,32 @@ const cap = s => String(s).charAt(0).toUpperCase() + String(s).slice(1);
 // The funnel's last stage (EVAL_FUNNEL_FINAL, or the last of EVAL_FUNNEL_STAGES); null when the run was not a funnel.
 const FUNNEL = EVM && EVM.funnel ? EVM.funnel : null;
 const FUNNEL_FINAL = FUNNEL ? (FUNNEL.final || (FUNNEL.stages.length ? FUNNEL.stages[FUNNEL.stages.length-1][0] : null)) : null;
+/* v2.3.6: with the funnel, a model that stopped at an earlier stage answered only that stage's questions (11 per
+   dataset at quick) while the finalists answered the whole set, so its percentages are not comparable: 11/11 is not
+   better than 41/43. Such models are left out of the dataset accuracy charts, the quality-vs-speed chart and the quant
+   table's eval average, unless the viewer shows them (faded, with their stage after the name). Long-context retrieval
+   is asked in full at the first stage, so that chart keeps every model. The table and the Agent leaderboard are
+   unchanged. A view never changes a score. */
+const stageRows = s => { const st = FUNNEL && FUNNEL.stages.find(x=>x[0]===s); return st ? st[1] : null; };
+const atFinal = m => !FUNNEL_FINAL || !m.eval_stage || m.eval_stage === FUNNEL_FINAL;
+const evEarly = m => !atFinal(m) && EV.some(e=>evPct(m,e)!=null);
+const earlyTip = m => `stopped at the ${m.eval_stage} stage (${stageRows(m.eval_stage)??'?'} questions per dataset, finalists ${stageRows(FUNNEL_FINAL)??'all'})`
+  + (m.rank_state==='no_agent' ? ': no Agent score' : m.rank_state==='screened' ? ': screened out' : '') + '; not comparable with the finalists';
+const yTicksEarly = items => ({...yTicks, callback(v){ const l = this.getLabelForValue(v), m = items[v];
+  return m && evEarly(m) ? `${l}  [${m.eval_stage}]` : l; },
+  color:ctx=>isHlLabel(ctx.chart,ctx.index)?HLRED():(items[ctx.index] && evEarly(items[ctx.index]) ? TH.mute : TH.text)});
+function renderEarlyNote(early){
+  const el = $('evearly'); if (!el) return;
+  if (!early.length){ el.hidden = true; el.innerHTML = ''; return; }
+  const by = {}; early.forEach(m=>{ (by[m.eval_stage] = by[m.eval_stage] || []).push(m); });
+  const parts = Object.entries(by).map(([s,ms])=>`${ms.length} at <b>${esc(s)}</b> (${stageRows(s)??'?'} questions per dataset)`).join(', ');
+  const names = early.map(m=>esc(m.model)).join('<br>');
+  el.hidden = false;
+  el.innerHTML = `<span class="tipd" data-tip="${esc('<b>Stopped before the funnel final</b><br>'+names)}">\u24D8 ${early.length} model${early.length>1?'s':''} stopped before the funnel final (${parts}); the finalists answered ${stageRows(FUNNEL_FINAL)??'every'} questions per dataset.</span> `
+    + (VIEW.evearly ? 'They are shown faded, with their stage after the name, and are not comparable with the finalists. ' : 'Their scores rest on far fewer questions, where a perfect score is common by luck, so they are left out of the accuracy charts, the quality-vs-speed chart and the quant table\'s eval average (long-context retrieval keeps every model). ')
+    + `<button class="tog${VIEW.evearly?' on':''}" id="evearlybtn">${VIEW.evearly?'Hide them':'Show them'}</button>`;
+}
+document.addEventListener('click', e => { if (e.target && e.target.id==='evearlybtn'){ VIEW.evearly = !VIEW.evearly; saveView(); render(); } });
 const funnelTip = () => !FUNNEL ? '' : `<b>Funnel final: ${esc(cap(FUNNEL_FINAL))}</b><br>The finalists were asked up to the <code>${esc(FUNNEL_FINAL)}</code> profile (EVAL_FUNNEL_FINAL). Stages: ${FUNNEL.stages.map(s=>esc(s[0])+' ('+(s[1]??'all')+')').join(' &rarr; ')}.<br>${ALL.filter(m=>m.eval_stage===FUNNEL_FINAL).length} of ${ALL.filter(m=>m.eval_stage).length} evaluated models reached it.`;
 const profileHtml = () => !EVM ? '' : `<span class="sub tipd" data-tip="${esc(FUNNEL ? funnelTip() : '<b>Eval profile</b><br>Every model was asked the same '+esc(EVM.profile)+' question set (EVAL_PROFILE).')}">Eval profile <b style="color:var(--text)">${esc(EVM.profile)}</b>${FUNNEL_FINAL ? ` &middot; funnel final <b style="color:var(--text)">${esc(FUNNEL_FINAL)}</b> <span>(${FUNNEL.stages.map(s=>esc(s[0])+' '+(s[1]??'all')).join(' &rarr; ')})</span>` : ''}</span>`;
 
@@ -700,11 +734,11 @@ function quantGroups(OKR){
   const g = {}; OKR.forEach(m=>(g[m.quant] = g[m.quant]||[]).push(m));
   const mean = xs => xs.length ? xs.reduce((s,x)=>s+x,0)/xs.length : null;
   return Object.entries(g).map(([q,ms])=>({q, n:ms.length, avg:ms.reduce((s,m)=>s+m.avg_tps,0)/ms.length,
-    ev:mean(ms.map(m=>m.eval_avg_pct).filter(x=>x!=null)), names:ms.map(m=>m.model)})).sort((a,b)=>b.avg-a.avg);
+    ev:mean(ms.filter(m=>!evEarly(m)).map(m=>m.eval_avg_pct).filter(x=>x!=null)), names:ms.map(m=>m.model)})).sort((a,b)=>b.avg-a.avg);   // v2.3.6: finalists only
 }
 function renderQuant(OKR){
   const qg = quantGroups(OKR), showEv = EV.length>0 && qg.some(x=>x.ev!=null);
-  $('qtbl').innerHTML = '<tr><th>Quant</th><th>Models</th><th>Avg TPS</th>' + (showEv?'<th>Eval avg %</th>':'') + '<th style="text-align:left">Members</th></tr>' +
+  $('qtbl').innerHTML = '<tr><th>Quant</th><th>Models</th><th>Avg TPS</th>' + (showEv?`<th${FUNNEL_FINAL?` title="Funnel finalists only (models that reached ${esc(FUNNEL_FINAL)})"`:''}>Eval avg %</th>`:'') + '<th style="text-align:left">Members</th></tr>' +
     qg.map(x=>`<tr><td>${esc(x.q)}</td><td>${x.n}</td><td style="color:${tpsColor(x.avg)}">${fmt(x.avg)}</td>${showEv?`<td style="color:${x.ev==null?'inherit':accColor(x.ev)}">${fmt(x.ev)}</td>`:''}<td style="text-align:left;white-space:normal">${x.names.map(n=>`<span class="mn${hlc(n)}" data-model="${esc(n)}">${esc(n)}</span>`).join(', ')}</td></tr>`).join('');
 }
 

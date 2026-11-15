@@ -233,6 +233,12 @@ DATASET_ROWS = {"gpqa": 198, "mmlu_pro": 12032, "humaneval": 164, "mbpp": 500, "
                 "gsm8k": 1319, "math": 500}
 
 
+def _builtin_size():
+    """Number of built-in tool-calling cases (96 in v2.3.6)."""
+    from ..evals.toolcall_cases import CASES
+    return len(CASES)
+
+
 def margin(n):
     """95% margin of error in points for n questions (worst case): 98 / sqrt(n), as everywhere in this tool."""
     return round(98 / n ** 0.5, 1) if n else None
@@ -253,14 +259,16 @@ def guides(vals):
     lc_n = num("LONGCTX_TRIALS", 2) * num("LONGCTX_KEYS", 4)
     tests = []
     for key, spec in EVAL_SPECS.items():
-        size = 32 if key == "toolcall" else DATASET_ROWS.get(key)
-        tests.append({"key": key, "label": spec.get("label", key), "size": size, "full": bool(spec.get("full"))})
+        size = _builtin_size() if key == "toolcall" else DATASET_ROWS.get(key)
+        tests.append({"key": key, "label": spec.get("label", key), "size": size, "full": bool(spec.get("full")),
+                      "min": spec.get("min_rows")})
     profiles = []
     for name, rows in PROFILE_ROWS.items():
         per = {}
         for t in tests:
-            n = t["size"] if t["full"] else (rows if t["size"] is None else
-                                             (t["size"] if rows is None else min(rows, t["size"])))
+            r = rows if rows is None or not t["min"] else max(t["min"], rows)     # tool calling: at least 32 (v2.3.6)
+            n = t["size"] if t["full"] else (r if t["size"] is None else
+                                             (t["size"] if r is None else min(r, t["size"])))
             per[t["key"]] = {"n": n, "margin": margin(n) if n else None}
         profiles.append({"name": name, "rows": rows, "margin": margin(rows) if rows else None, "tests": per})
     finals = []

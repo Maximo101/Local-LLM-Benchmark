@@ -770,11 +770,21 @@ class EvalPhase:
               + (", budget forcing" if cfg.eval_budget_forcing else "")
               + f"; HTTP {self.transport.name}, concurrency {cfg.eval_concurrency})")
         if len(self.stages) > 1:
-            print("  funnel: " + " -> ".join(f"{n} ({r if r is not None else 'all'} rows)" for n, r in self.stages)
+            from ..config import rows_for
+            tool = ""
+            if "toolcall" in self.keys:
+                n_t = [len(self.data["toolcall"]) if r is None else min(len(self.data["toolcall"]), rows_for("toolcall", r))
+                       for _, r in self.stages]
+                tool = " (tool calling " + " -> ".join(str(x) for x in n_t) + " cases)"
+                grows = n_t[-1] > n_t[0]
+            else:
+                grows = False
+            print("  funnel: " + " -> ".join(f"{n} ({r if r is not None else 'all'} rows)" for n, r in self.stages) + tool
                   + f"; hard rules first (context / tool calling / long-context: no Agent score), then at each gate keep "
                   f"every model whose upper bound (+{cfg.eval_funnel_margin:g} margin) reaches the lower bound of model "
-                  f"#{cfg.eval_leaders} ({100 * cfg.eval_funnel_conf:.0f}% one-sided, evals error only), never fewer "
-                  f"than {cfg.eval_leaders}")
+                  f"#{cfg.eval_leaders} ({100 * cfg.eval_funnel_conf:.0f}% one-sided, evals error"
+                  + (" + tool calling's while more tool cases are to come" if grows else " only")
+                  + f"), never fewer than {cfg.eval_leaders}")
         if skipped:
             print(f"  skipped (EVAL_SKIP_INELIGIBLE={cfg.eval_skip_ineligible}): {len(skipped)} model(s) that cannot be "
                   "deployed under the active rules")

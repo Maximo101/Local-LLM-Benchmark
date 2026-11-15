@@ -128,9 +128,11 @@ async def _chat_stream(request, body):
 def _tool_reply(body):
     """Tool-calling eval: answer each built-in case correctly, except two deliberate mistakes (a wrong argument in
     simple-02, a call written as text in simple-03) so grading is exercised both ways."""
-    from llmbench.evals.toolcall_cases import CASES
-    prompt = body["messages"][-1]["content"]
-    case = next((c for c in CASES if c["prompt"] == prompt), None)
+    from llmbench.evals.toolcall_cases import CASES, build_items
+    # matched on the whole conversation: chained cases (v2.3.6) share a prompt and differ in the tool results
+    ids = {json.dumps(it["messages"], sort_keys=True): it["id"][len("tool-"):] for it in build_items()}
+    cid = ids.get(json.dumps(body["messages"], sort_keys=True))
+    case = next((c for c in CASES if c["id"] == cid), None)
     if case is None or not case["expect"]:
         return {"content": "Here is my answer without tools.", "tool_calls": None}
     calls = []
