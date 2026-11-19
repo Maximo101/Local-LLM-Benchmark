@@ -25,6 +25,7 @@ flagged (LONGCTX_KV_ACTION=flag, the default) or not tested (skip). Lower the se
 """
 from __future__ import annotations
 
+import math
 import random
 import re
 import time
@@ -134,6 +135,14 @@ def _ask_once(cfg, session, model, prompt, timeout, max_tokens=None):
             ch.get("finish_reason"), len(msg.get("reasoning_content") or ""))
 
 
+def haystack_tpw(tpw):
+    """v2.3.7: the tokens-per-word figure the document is built from, rounded UP to a 0.02 step, so a model whose
+    measured figure moves a little between runs (1.172 -> 1.177) gets the same document (the seeded haystack's length,
+    and so its needle positions, follow this figure). Rounding up only ever makes the document shorter (at most
+    ~1.7%), never too long for the context."""
+    return math.ceil((tpw or 1.25) * 50 - 1e-9) / 50
+
+
 def run_longctx(cfg, session, r, ctx, sink=None):
     """Fill r['longctx_<len>_pct'], r['longctx_kv_ok'], r['longctx_note'] (and deferred prefill_<len>_tps).
     Blocking (call from a thread)."""
@@ -147,7 +156,7 @@ def run_longctx(cfg, session, r, ctx, sink=None):
             print(f"    Long-ctx   skipped: {msg}")
             return
         notes.append(msg)
-    tpw = r.get("tok_per_word") or 1.25
+    tpw = haystack_tpw(r.get("tok_per_word"))
     t_all = now()
     for n in cfg.longctx_lengths:
         label = LONGCTX_SLOTS[n]

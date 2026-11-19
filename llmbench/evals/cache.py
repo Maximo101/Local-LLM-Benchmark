@@ -95,12 +95,66 @@ def question_key(cfg, key, item, payload, think_budget):
     return _sha({"dataset": key, "id": item["id"], "body": body, "settings": settings})
 
 
+def budget_free_key(cfg, key, item, payload):
+    """v2.3.7: question_key() without the thinking budget and max_tokens. Records stored with it can be reused under
+    another budget when they could not have been affected by it (see ResultCache.lookup_any_budget)."""
+    body = {k: v for k, v in payload.items() if k not in ("model", "stream", "stream_options", "max_tokens")}
+    settings = {"loop": cfg.eval_loop_abort, "salvage": cfg.eval_salvage,
+                "retry": cfg.eval_retry_on_length, "stream": cfg.eval_stream, "forcing": cfg.eval_budget_forcing,
+                "strict": cfg.eval_toolcall_strict, "lcb_tests": cfg.eval_lcb_max_tests,
+                "code_timeout": cfg.eval_code_timeout, "grader": GRADER_VERSION}
+    return _sha({"dataset": key, "id": item["id"], "body": body, "settings": settings, "v": "nb1"})
+
+
+_NATURAL_END = ("stop", "tool_calls")
+
+
+def fits_budget(rec, budget, max_tokens):
+    """Would this answer have come out the same under `budget` thinking tokens and `max_tokens`? Only when it was one
+    attempt that ended on its own (no cap, timeout, loop or length cut) and used no more than either limit: then
+    neither limit was ever reached, whichever budget it was asked with. Anything else is asked again."""
+    att = rec.get("attempts") or []
+    if len(att) != 1 or att[0].get("end") not in _NATURAL_END:
+        return False
+    if rec.get("capped") or rec.get("trunc") or rec.get("degraded") or rec.get("api_error") or rec.get("forced"):
+        return False
+    think, total = rec.get("think_tokens") or 0, rec.get("tokens")
+    if total is None:
+        return False
+    if budget and budget > 0 and think > budget:
+        return False
+    return not max_tokens or total <= max_tokens
+
+
+def build_changes(results, prev):
+    """v2.3.7: {(old build, new build): [models]} for models whose llama.cpp build differs from the newest finished run
+    (`prev` = cli.previous_speeds()). The build is part of every model fingerprint, so these models' cached answers
+    will not be reused. Rows without a build on either side are left out (unknown is not a change)."""
+    out = {}
+    for r in results:
+        p = (prev or {}).get(r.get("model")) or {}
+        old, new = p.get("build"), r.get("build_info")
+        if r.get("status") == "ok" and old and new and old != new and not r.get("_resumed"):
+            out.setdefault((old, new), []).append(r["model"])
+    return out
+
+
+def build_change_lines(changes, n_models):
+    lines = []
+    for (old, new), models in changes.items():
+        lines.append(f"[warn] llama.cpp build changed since the last run ({old} -> {new}) for {len(models)} of "
+                     f"{n_models} model(s). The build is part of the result cache's key, so their cached answers will "
+                     "NOT be reused: every question is asked again (the start-of-run estimate may have assumed reuse).")
+    return lines
+
+
 class ResultCache:
     """Thread-safe append-only store. lookup() returns a copy of the cached record or None."""
 
     def __init__(self, root):
         self.root = Path(root)
         self._mem: dict = {}            # fingerprint -> {qkey: record}
+        self._alt: dict = {}            # fingerprint -> {budget-free key: [records]} (v2.3.7)
         self._lock = threading.Lock()
 
     def _path(self, model, fp):
@@ -110,7 +164,7 @@ class ResultCache:
     def _load(self, model, fp):
         if fp in self._mem:
             return self._mem[fp]
-        recs = {}
+        recs, alt = {}, {}
         p = self._path(model, fp)
         if p.exists():
             with open(p, encoding="utf-8") as fh:
@@ -118,9 +172,12 @@ class ResultCache:
                     try:
                         obj = json.loads(line)
                         recs[obj["qkey"]] = obj["rec"]
+                        if obj.get("akey"):
+                            alt.setdefault(obj["akey"], []).append(obj["rec"])
                     except (ValueError, KeyError, TypeError):
                         continue                # a half-written last line after a crash
         self._mem[fp] = recs
+        self._alt[fp] = alt
         return recs
 
     def lookup(self, model, fp, qkey):
@@ -128,14 +185,29 @@ class ResultCache:
             rec = self._load(model, fp).get(qkey)
         return dict(rec) if rec is not None else None
 
-    def store(self, model, fp, qkey, rec):
+    def lookup_any_budget(self, model, fp, akey, budget, max_tokens):
+        """v2.3.7: a cached answer asked with another thinking budget, if fits_budget() says this budget could not have
+        changed it (the newest such record). Only records written by v2.3.7 or later carry the budget-free key."""
+        with self._lock:
+            self._load(model, fp)
+            recs = self._alt.get(fp, {}).get(akey) or []
+        for rec in reversed(recs):
+            if fits_budget(rec, budget, max_tokens):
+                return dict(rec)
+        return None
+
+    def store(self, model, fp, qkey, rec, akey=None):
         if rec.get("api_error"):
             return                              # a server failure is not an answer: ask again next time
         with self._lock:
             self._load(model, fp)[qkey] = rec
+            line = {"qkey": qkey, "rec": rec}
+            if akey:
+                line["akey"] = akey
+                self._alt.setdefault(fp, {}).setdefault(akey, []).append(rec)
             self.root.mkdir(parents=True, exist_ok=True)
             with open(self._path(model, fp), "a", encoding="utf-8") as fh:
-                fh.write(json.dumps({"qkey": qkey, "rec": rec}, ensure_ascii=False, default=str) + "\n")
+                fh.write(json.dumps(line, ensure_ascii=False, default=str) + "\n")
 
     def count(self, model, fp):
         with self._lock:

@@ -328,6 +328,36 @@ def _models(cfg, history):
     return sorted(history), "history (server not reachable)"
 
 
+def current_build(cfg):
+    """v2.3.7: the llama.cpp build the server runs now, read from a model llama-swap already has loaded (/running, then
+    that model's /props), so nothing is loaded for it. None when no model is loaded or the server is not reachable."""
+    if getattr(cfg, "backend", None) == "strata":
+        return None
+    from .client import get_props, make_session
+    try:
+        s = make_session(cfg, "llama-swap")
+        j = s.get(cfg.base_url + "/running", timeout=5).json()
+        for e in (j.get("running", []) if isinstance(j, dict) else j or []):
+            m = e.get("model") if isinstance(e, dict) else None
+            if m:
+                b = get_props(cfg, s, m).get("build_info")
+                if b:
+                    return b
+    except Exception:
+        return None
+    return None
+
+
+def stale_builds(cfg, models, history, build=None):
+    """-> (current build, {model: build of its last results}) for models whose last results came from another
+    llama.cpp build. The build is part of every model's result-cache fingerprint, so their cache will not match."""
+    build = build or current_build(cfg)
+    if not build:
+        return None, {}
+    return build, {m: history[m]["build_info"] for m in models
+                   if (history.get(m) or {}).get("build_info") and history[m]["build_info"] != build}
+
+
 def estimate(cfg, brief=False):
     """Print the estimate. brief=True: one line, for the start of a normal run. Returns total seconds or None."""
     cfg = copy(cfg)                              # never change the settings of the run that asked
@@ -347,6 +377,12 @@ def estimate(cfg, brief=False):
     total_full = sum(sum(v for k, v in e.items() if not k.startswith("_")) for e in per.values())
     mode = cache_mode(cfg) if cfg.run_eval_tests else "false"
     cache = cached_answers(cfg) if cfg.run_eval_tests else {}
+    build, stale = stale_builds(cfg, models, history) if cfg.run_eval_tests and mode == "true" else (None, {})
+    for m in stale:                       # v2.3.7: a llama.cpp update means a new fingerprint, so nothing is reused
+        cache.pop(m, None)
+    olds = sorted(set(stale.values()))
+    stale_txt = (f"llama.cpp build changed ({', '.join(olds)} -> {build}): the result cache will NOT be reused for "
+                 f"{len(stale)} of {len(models)} model(s)") if stale else ""
     shape = _stage_shape(cfg, max(1, sum(1 for m in models if not per[m].get("_skip"))))
     sanity = cfg.eval_sanity_pct / 100 if mode == "true" else 0.0
     total = 0.0
@@ -374,6 +410,7 @@ def estimate(cfg, brief=False):
         reused = sum((e.get("_cached") or (0, 0, 0))[0] for e in per.values())
         print(f"Estimated run time: ~{fmt_hr_m_s(total)} for {len(models)} model(s)"
               + (" (funnel: assumes half the models pass each gate)" if funnel else "")
+              + (f"; {stale_txt}" if stale_txt else "")
               + (f"; ~{reused} answers from the result cache" if reused else
                  "; full re-run (EVAL_RESULT_CACHE=refresh)" if mode == "refresh" else
                  "; full re-run (result cache off)" if mode == "false" and cfg.run_eval_tests else "")
@@ -391,7 +428,9 @@ def estimate(cfg, brief=False):
                        + (", halving per model while answers match" if cfg.eval_sanity_adaptive else "")
                        if sanity else ""),
             "refresh": "refresh: FULL re-run, every question is asked again and replaces the cached answer",
-            "false": "off: FULL re-run, nothing is reused or stored"}[mode] + "\n")
+            "false": "off: FULL re-run, nothing is reused or stored"}[mode]
+              + (f"\n  [warn] {stale_txt} (the build is part of each model's cache fingerprint)" if stale_txt else "")
+              + "\n")
     w = max(len(m) for m in models)
     show_c = mode == "true" and cfg.run_eval_tests
     print(f"  {'model':<{w}}  {'speed':>8}  {'long-ctx':>8}  {'evals':>8}" + (f"  {'cached':>11}" if show_c else "")

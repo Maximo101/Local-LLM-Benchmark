@@ -50,7 +50,7 @@ from ..pause import CONTROL, PauseRestart
 from ..config import (AUTO_BUDGET, EVAL_SPECS, FALLBACK_TOKENS, eval_temperature_for, funnel_stages, rows_for, sampling_label,
                       stage_rows, temperature_label, think_budget, think_budget_label, think_budget_basis)
 from .answers import extract_choice, strip_think
-from .cache import ResultCache, SanityCheck, model_fingerprint, question_key, same_answer
+from .cache import ResultCache, SanityCheck, budget_free_key, model_fingerprint, question_key, same_answer
 from .funnel import gate
 from .grading import grade_item
 from .longctx import run_longctx
@@ -230,7 +230,7 @@ def inflight_cap(cfg, me, key, items):
         if fit < want:
             want = fit
             why.append(f"KV pool {me.ctx:,} tokens / up to {per:,} per request"
-                       + ("" if me.kv_unified else " (assumed shared: -kvu unknown)"))
+                       + ("" if me.kv_unified else " (KV pool assumed shared: --kv-unified not seen)"))
     return want, "; ".join(why)
 
 
@@ -504,7 +504,8 @@ class DatasetRun:
                     notes = list(notes) + [f"[sanity] {item['id']}: cached {fmt(check.get('answer'), check.get('correct'))}"
                                            f", now {fmt(rec['answer'], rec['correct'])}; the new answer is scored"]
             if self.me.cache is not None and qkey:
-                self.me.cache.store(self.model, self.me.fp, qkey, rec)
+                self.me.cache.store(self.model, self.me.fp, qkey, rec,
+                                    budget_free_key(self.cfg, self.key, item, payload))
             self._account(rec, notes)
         finally:
             self._grade_slots.release()
@@ -580,6 +581,12 @@ class DatasetRun:
             if me.cache is not None and me.fp:
                 qkey = question_key(cfg, self.key, item, payload, self.budget)
                 hit = None if me.refresh else me.cache.lookup(self.model, me.fp, qkey)
+                if hit is None and not me.refresh:       # v2.3.7: asked before with another thinking budget that it
+                    hit = me.cache.lookup_any_budget(    # never reached, so this budget cannot change it
+                        self.model, me.fp, budget_free_key(cfg, self.key, item, payload), self.budget,
+                        payload.get("max_tokens"))
+                    if hit is not None:
+                        self._budget_reused = getattr(self, "_budget_reused", 0) + 1
                 if hit is not None:
                     hit.pop("sanity", None)              # a verdict from an earlier run is not this run's check
                     hit.pop("sanity_cached", None)
@@ -637,7 +644,9 @@ class DatasetRun:
         print(("\r" if self.live else "") + f"    {short:<10} {t.correct}/{n} = {100 * t.correct / n if n else 0:.1f}%"
               + (f"  [{t.na} N/A]" if t.na else "") + f"  ({fmt_hms(wall)})"
               + (f"  x{self.inflight} parallel" if self.inflight > 1 else "")
-              + (f"  [{t.cached} from cache]" if t.cached else "")
+              + (f"  [{t.cached} from cache" + (f", {self._budget_reused} asked under another thinking budget"
+                                                     if getattr(self, "_budget_reused", 0) else "") + "]"
+                 if t.cached else "")
               + (f"  [sanity: {t.sanity} re-asked, {t.sanity_diff} different]" if t.sanity else "")
               + (" " * 12 if self.live else ""))
         if self._aborted:
@@ -879,8 +888,10 @@ class EvalPhase:
             done = done_model.setdefault(key, {})
             ask = [it for it in want if it["id"] not in done]
             inflight, why = inflight_cap(cfg, me, key, ask)
-            if why and cfg.eval_concurrency > 1:
-                print(f"    {EVAL_SPECS[key]['short']:<10} in flight: {inflight} (capped: {why})")
+            # v2.3.7: said once per model (and again only if the number changes), not before every dataset and stage
+            if why and cfg.eval_concurrency > 1 and ask and r.get("_inflight_said") != inflight:
+                r["_inflight_said"] = inflight
+                print(f"    In flight: {inflight} per dataset (capped: {why})")
             r["eval_inflight"] = max(r.get("eval_inflight") or 1, inflight)
             if ask:
                 recs, wall = await self._dataset(me, key, ask, sname, inflight)

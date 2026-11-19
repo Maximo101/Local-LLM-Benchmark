@@ -472,11 +472,16 @@ def _run(args, cfg, stamp, info):
         else:
             _defer_prefill(cfg, eval_data)
             st.fresh_evals = _has_evals(cfg, eval_data)
+            prev = previous_speeds(cfg)              # read before anything of this run replaces results.json
             t0 = now()
             st.interrupted = _speed_phase(cfg, session, models, st, info)
             info.setdefault("phases", {})["speed_s"] = round(now() - t0, 1)
             # Evaluations run AFTER the speed tests, once telemetry is stopped so they cannot disturb it.
             if _has_evals(cfg, eval_data) and not st.interrupted and any(r["status"] == "ok" for r in st.results):
+                if cfg.eval_result_cache and not cfg.eval_cache_refresh:
+                    from .evals.cache import build_change_lines, build_changes
+                    for line in build_change_lines(build_changes(st.results, prev), len(st.results)):
+                        print(line)
                 _early_dashboard(cfg, st, stamp)
                 _eval_phase(cfg, session, st, eval_data, stamp, info)
 

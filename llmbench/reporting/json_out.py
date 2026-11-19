@@ -53,7 +53,9 @@ _GROUPS = {
               # v2.3.1: the single runs, their spread, how tokens/s was obtained, the llama.cpp build, and the change
               # against the previous run of the same model
               "tps_samples", "tps_spread_pct", "tps_basis", "speed_retries", "build_info", "tps_prev",
-              "tps_change_pct", "build_prev"],
+              "tps_change_pct", "build_prev",
+              # v2.3.7: tokens the chat template adds to every prompt (subtracted when sizing long prompts)
+              "prompt_overhead_tokens"],
     "gpu": ["gpu_w", "gpu_peak_w", "idle_gpu_w", "gpu_util", "gpu_temp", "vram_gb", "vram_delta_gb",
             "vram_total_gb", "vram_pct"],
     "cpu": ["cpu_w", "cpu_util"],

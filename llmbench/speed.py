@@ -187,10 +187,40 @@ def _timed_runs(cfg, session, gpu, host, ha, model):
 # Deployed-context tests: prefill at long prompt lengths, agent-prompt time to first token
 # --------------------------------------------------------------------------- #
 
-def tokens_per_word(runs):
-    """Measured prompt tokens per filler word (from the PREFILL_WORDS test), else a typical 1.2."""
-    pre = [x for x in runs.get("prefill", []) if x.get("prompt_n")]
-    return median([x["prompt_n"] / (x["_words"] + 14) for x in pre if x.get("_words")]) or 1.2
+PREFILL_HEADER_WORDS = 10      # "[1a2b3c4d] Summarise the theme of this text in one short sentence." (prefill_prompt)
+
+
+def tokens_per_word(runs, tech_prompt=None):
+    """Measured prompt tokens per filler word (from the PREFILL_WORDS test), else a typical 1.2.
+
+    v2.3.7: the chat template's own tokens are not words. Role markers are ~10-20 tokens, but some templates add a
+    default system prompt (Cyber-Tiel-Coder: ~180 tokens on every request). v2.3.6 divided them in, so such a model
+    read ~13% too many tokens per word and every long prompt built from the figure came out ~13% short (its "128k"
+    long-context test was 111k tokens, its 20k agent prompt 18.1k). Now the slope between the short tech prompt and the
+    prefill prompt is used, so the template's fixed tokens cancel out. Falls back to the v2.3.6 figure when there is no
+    tech prompt count or the slope is implausible."""
+    pre = [x for x in runs.get("prefill", []) if x.get("prompt_n") and x.get("_words")]
+    if not pre:
+        return 1.2
+    old = median([x["prompt_n"] / (x["_words"] + 14) for x in pre]) or 1.2
+    tech = [x["prompt_n"] for x in runs.get("tech", []) if x.get("prompt_n")]
+    if tech and tech_prompt:
+        n1, w1 = median(tech), len(tech_prompt.split())
+        n2 = median([x["prompt_n"] for x in pre])
+        w2 = median([x["_words"] for x in pre]) + PREFILL_HEADER_WORDS
+        if w2 > w1 + 100:
+            slope = (n2 - n1) / (w2 - w1)
+            if 0.5 <= slope <= 3.0:
+                return slope
+    return old
+
+
+def template_overhead(runs, tpw, tech_prompt):
+    """Prompt tokens the chat template adds to every request (role markers, a default system prompt), or None."""
+    tech = [x["prompt_n"] for x in runs.get("tech", []) if x.get("prompt_n")]
+    if not tech or not tech_prompt:
+        return None
+    return max(0, round(median(tech) - tpw * len(tech_prompt.split())))
 
 
 def _fit(target, ctx, reserve=96):
@@ -418,7 +448,12 @@ def _bench_model(cfg, session, gpu, host, ha, model, unload_state) -> dict:
             r["error"] = f"{label}: {e}\n  hint: {why}"
         return r
     _summarise(r, runs, cache_runs, base)
-    tpw = tokens_per_word(runs)
+    tpw = tokens_per_word(runs, cfg.tech_prompt)
+    over = template_overhead(runs, tpw, cfg.tech_prompt)
+    r["prompt_overhead_tokens"] = over
+    if over and over >= 64:
+        print(f"    [info] the chat template adds ~{over} tokens to every prompt (a default system prompt?); long "
+              "prompts are sized without them")
     try:                                        # optional, slow tests: a failure never fails the model
         with Clock(r, "prefill_ctx"):
             depth = depth_for(cfg, r.get("ctx_size"))

@@ -132,7 +132,11 @@ def grade_toolcall(item, text, strict=True):
     pred = ", ".join(n for n, _ in calls) or "(no call)"
     expect = item["expect"]
     if not expect:
-        return (not calls), pred, ("" if not calls else "called a tool for a question that needs none")
+        if not calls:
+            return True, pred, ""
+        if item.get("category") == "missing":       # v2.3.7: the wording said "needs none" for these too
+            return False, pred, "called a tool although a required value was not given (it should ask the user)"
+        return False, pred, "called a tool for a question that needs none"
     if not calls:
         return False, pred, "no tool call"
     why = _match_all(expect, calls, schema)

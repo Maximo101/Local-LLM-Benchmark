@@ -97,7 +97,7 @@ def test_missing_info_cases_fail_a_made_up_value():
     made_up = toolcall.encode_reply("", [{"function": {"name": "send_email", "arguments": json.dumps(
         {"to": "landlord@example.com", "subject": "Hot water", "body": "The hot water is broken."})}}])
     ok, _, why = toolcall.grade_toolcall(it, made_up)
-    assert not ok and "needs none" in why
+    assert not ok and "required value was not given" in why      # v2.3.7 wording
 
 
 def test_chained_cases_carry_the_earlier_call_and_need_its_result():
