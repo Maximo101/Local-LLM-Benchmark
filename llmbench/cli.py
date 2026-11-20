@@ -655,6 +655,15 @@ def _parser():
                     help="combine finished runs into one dashboard, e.g. a Strata run with a llama-swap run (no "
                          "files: the newest run of each backend in OUTPUT_DIR); scores are re-computed over all models "
                          "together; nothing is benchmarked")
+    ap.add_argument("--diff-runs", nargs="*", metavar="RUN",
+                    help="what changed between finished runs, model by model (rank, Agent score, accuracy per dataset, "
+                         "long context, speed, VRAM, power, launch and run settings), each change judged against its "
+                         "noise; RUN = a benchmark_<stamp>.json / rescored_<stamp>.json, a folder or a stamp, the first "
+                         "is the baseline; no RUN: the two newest runs, a number N: the N newest. Writes "
+                         "run_diff_<stamp>.html and .json; nothing is benchmarked (v2.4.1)")
+    ap.add_argument("--diff-rescore", action="store_true",
+                    help="with --diff-runs: score every run again with this version first (as --rescore does, nothing "
+                         "else is written), so score and rank changes come from the runs, not the scoring code")
     ap.add_argument("--force", action="store_true",
                     help="with --compare: combine runs even when their eval settings differ; with --forget-run: really remove; with a run: start "
                          "although another benchmark run is still going")
@@ -756,6 +765,12 @@ def main():
     if args.compare is not None:
         from .compare import compare_runs
         compare_runs(cfg, args.compare, force=args.force)
+        return
+    if args.diff_rescore and args.diff_runs is None:
+        ap.error("--diff-rescore goes with --diff-runs")
+    if args.diff_runs is not None:
+        from .rundiff import diff_runs
+        diff_runs(cfg, args.diff_runs, rescore=args.diff_rescore)
         return
     if args.forget_run:
         from .forget import forget_run
