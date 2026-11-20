@@ -5,9 +5,12 @@ figure is a weighted composite of three parts, each compared like for like acros
 
     evals     mean of the dataset scores except tool calling              AGENT_*: the rest (default 0.45)
     tools     tool-calling accuracy                                       AGENT_TOOL_WEIGHT (0.30)
-    long-ctx  long-context retrieval over the lengths ALL ranked models   AGENT_LONGCTX_WEIGHT (0.25)
-              ran (a 90k model skips the 128k test; comparing everyone on the lengths they all ran keeps that
-              from flattering it - the context curve carries the context preference instead)
+    long-ctx  long-context retrieval over AGENT_LONGCTX_BASIS (v2.4,     AGENT_LONGCTX_WEIGHT (0.25)
+              default 64k,90k): each model on the basis lengths its loaded context fits (a 64k model on 64k, a
+              90k or 128k model on 64k and 90k). The context curve carries the context preference.
+              v2.3 used the lengths ALL ranked models ran, so one 64k model reaching the final took 90k out of
+              everyone's composite and reordered models whose own answers had not changed (2026-11-16 vs -19:
+              Qwen3.6-MTP #10 vs #5). AGENT_LONGCTX_BASIS=common keeps that rule (for comparisons).
 
 A part the run does not have gives its weight back to the evals. If a ranked model has no long-context result at
 all (it failed, or its KV was below LONGCTX_KV_MIN with LONGCTX_KV_ACTION=skip), long-context is left out of every
@@ -134,6 +137,35 @@ def common_lengths(rows):
     return [l for l in LC_LABELS if l in common], missing
 
 
+def basis_labels(cfg, all_rows):
+    """The long-ctx lengths (labels, slot order) the composite may use in this run: AGENT_LONGCTX_BASIS that the run
+    tested. Only the run's settings decide this, never which models reached the final."""
+    tested = {l for r in all_rows for l in lc_results(r)}
+    raw = getattr(cfg, "agent_longctx_basis", "64k,90k") or "64k,90k"
+    want = LC_LABELS if raw == "all" else raw.split(",")
+    return [l for l in LC_LABELS if l in want and l in tested]
+
+
+def row_lengths(r, lengths):
+    """The basis lengths this model is judged on: those its loaded context fits (the run skips a length above the
+    loaded context) and that it has a result for. Unknown context: every basis length it has."""
+    ctx, lc = r.get("ctx_size"), lc_results(r)
+    return [l for l in lengths if l in lc and (not ctx or LC_TOKENS[l] <= ctx)]
+
+
+def lc_n(r, label, default):
+    """Retrievals asked at one length: longctx_<label>_n when the run recorded it (v2.4 borderline probes ask more),
+    else the run's trials x keys."""
+    return r.get(f"longctx_{label}_n") or default
+
+
+def lc_value(r, lengths):
+    """Mean long-ctx % over this model's lengths (row_lengths), or None."""
+    own = row_lengths(r, lengths)
+    lc = lc_results(r)
+    return sum(lc[l] for l in own) / len(own) if own else None
+
+
 def weights(cfg, has_evals, has_tools, has_lc):
     """{part: weight} over the parts present, summing to 1. A missing part's weight goes back to the evals; if the
     evals are missing too (a tools-only run), the remaining parts are scaled up."""
@@ -170,10 +202,11 @@ def parts(r, ekeys, has_tools, lengths, lc_n_per_len):
     out["evals"] = (sum(p for p, _ in ev) / len(ev), ev) if ev and all(p is not None for p, _ in ev) else None
     tp = r.get(f"eval_{TOOL_KEY}_pct")
     out["tools"] = (tp, [(tp, r.get(f"eval_{TOOL_KEY}_n") or 0)]) if has_tools and tp is not None else None
-    lc = lc_results(r)
-    if lengths and all(l in lc for l in lengths):
-        v = sum(lc[l] for l in lengths) / len(lengths)
-        out["longctx"] = (v, [(v, lc_n_per_len * len(lengths))])
+    own = row_lengths(r, lengths) if lengths else []
+    if own:
+        lc = lc_results(r)
+        v = sum(lc[l] for l in own) / len(own)
+        out["longctx"] = (v, [(v, sum(lc_n(r, l, lc_n_per_len) for l in own))])
     else:
         out["longctx"] = None
     return out
@@ -232,19 +265,29 @@ def basis(cfg, pool, all_rows):
     (a part no model has is simply not in the run; a part one ranked model lacks is a dropped part, with a note)."""
     ekeys, has_tools = eval_keys(all_rows)
     run_has_lc = any(lc_results(r) for r in all_rows)
-    lengths, missing = common_lengths(pool) if run_has_lc else ([], [])
+    common = getattr(cfg, "agent_longctx_basis", "common") == "common"
+    if not run_has_lc:
+        lengths, missing = [], []
+    elif common:
+        lengths, missing = common_lengths(pool)
+    else:
+        lengths = basis_labels(cfg, all_rows)
+        missing = [r["model"] for r in pool if not row_lengths(r, lengths)]
     note = None
     if run_has_lc and cfg.agent_longctx_weight > 0:
         if missing:
             shown = ", ".join(missing[:3]) + (f" and {len(missing) - 3} more" if len(missing) > 3 else "")
             note = f"long-ctx left out of the Agent score: no long-ctx result for {shown}"
         elif not lengths:
-            note = "long-ctx left out of the Agent score: no length that every ranked model ran"
+            note = ("long-ctx left out of the Agent score: no length that every ranked model ran" if common else
+                    "long-ctx left out of the Agent score: the run tested none of AGENT_LONGCTX_BASIS "
+                    f"({getattr(cfg, 'agent_longctx_basis', '')})")
     has_lc = bool(lengths) and not missing and cfg.agent_longctx_weight > 0
     w = weights(cfg, bool(ekeys), has_tools, has_lc)
     lc_n = cfg.longctx_trials * cfg.longctx_keys
     names = {"evals": "evals", "tools": "tools", "longctx": "long-ctx"}
-    text = " · ".join(f"{names[k]} {round(100 * v)}%" + (f" ({', '.join(lengths)})" if k == "longctx" else "")
-                           for k, v in w.items())
+    per_model = "" if common or len(lengths) < 2 else "; each model on those its context fits"
+    text = " · ".join(f"{names[k]} {round(100 * v)}%"
+                      + (f" ({', '.join(lengths)}{per_model})" if k == "longctx" else "") for k, v in w.items())
     return {"weights": w, "ekeys": ekeys, "has_tools": has_tools, "lengths": lengths if has_lc else [],
             "lc_n": lc_n, "text": text + (f"; {note}" if note else ""), "note": note}

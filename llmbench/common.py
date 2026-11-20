@@ -10,7 +10,7 @@ import threading
 import time
 from datetime import datetime
 
-__version__ = "2.3.7"
+__version__ = "2.4.0"
 SCHEMA_VERSION = 1          # version of the results.json layout (bump when keys are renamed/removed)
 
 

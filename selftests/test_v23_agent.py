@@ -85,7 +85,9 @@ def test_unknown_ctx_is_not_penalised(cfg):
 # --------------------------------------------------------------------------- long-ctx over common lengths
 def test_longctx_compared_over_common_lengths(cfg):
     """v2.2 averaged only the lengths a model could hold: a 90k model skipped the hardest 128k test and looked
-    better than a 128k model that ran it. v2.3 compares everyone on the lengths all ranked models ran."""
+    better than a 128k model that ran it. v2.3 compares everyone on the lengths all ranked models ran.
+    v2.4: that rule is AGENT_LONGCTX_BASIS=common (test_v24.py covers the new default)."""
+    cfg.agent_longctx_basis = "common"
     big = _row("Big-27B-Q4_K_M", ctx=131072, lc={"64k": 100.0, "128k": 50.0})
     mid = _row("Mid-27B-Q4_K_M", ctx=92160, lc={"64k": 100.0})
     finalize([big, mid], cfg)
@@ -132,6 +134,7 @@ def test_failing_64k_means_no_agent_score(cfg):
 
 def test_model_without_longctx_drops_the_blend_with_a_note(cfg):
     cfg.agent_ctx_pass_pct = 0                              # usable context = loaded context (v2.3 before 2026-11-10)
+    cfg.agent_longctx_basis = "common"                      # the v2.3 rule (v2.4 default: test_v24.py)
     a = _row("A-27B-Q4_K_M", lc={"64k": 100.0, "128k": 100.0})
     b = _row("B-27B-Q4_K_M", lc={"64k": 50.0, "128k": 25.0})
     c = _row("C-27B-Q4_K_M", lc=None)                       # long-ctx failed (server down)

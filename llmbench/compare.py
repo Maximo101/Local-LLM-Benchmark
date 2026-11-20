@@ -10,7 +10,9 @@ So the combined ranking is the one a single run with all these models would give
 questions. That is checked first:
 
   must match (else refused, --force to combine anyway): eval seed, temperature, thinking budget(s), streaming /
-      loop-abort / salvage / budget-forcing switches. These change which questions are asked or what is measured.
+      loop-abort / salvage / budget-forcing switches, and (v2.4) the grading settings: strict tool calls, code-test
+      timeout, LiveCodeBench tests and date, extra request fields, long-context thinking. These change which questions
+      are asked, what is measured or what counts as right.
   noted: different datasets, question counts or long-context lengths (a model missing a dataset or questions is then
       shown "not ranked: incomplete evals", exactly as within one run), a different tool version or hardware.
 
@@ -43,6 +45,17 @@ _MUST_MATCH = {"seed": "eval seed (EVAL_SEED)", "temperature": "temperature (EVA
                "think_budgets": "per-dataset thinking budgets (EVAL_THINK_BUDGET_<DATASET>)",
                "stream": "streaming (EVAL_STREAM)", "loop_abort": "loop abort (EVAL_LOOP_ABORT)",
                "salvage": "partial-answer salvage (EVAL_SALVAGE)", "budget_forcing": "budget forcing (EVAL_BUDGET_FORCING)"}
+
+# v2.4: grading settings recorded only in the run's config snapshot; they change what counts as a right answer
+_MUST_MATCH_CONFIG = {"eval_toolcall_strict": "strict tool-call grading (EVAL_TOOLCALL_STRICT)",
+                      "eval_code_timeout": "code-test timeout (EVAL_CODE_TIMEOUT)",
+                      "eval_lcb_max_tests": "LiveCodeBench tests per problem (EVAL_LCB_MAX_TESTS)",
+                      "eval_lcb_since": "LiveCodeBench problem date (EVAL_LCB_SINCE)",
+                      "eval_extra_body": "extra request fields (EVAL_EXTRA_BODY)",
+                      "longctx_no_think": "long-context with thinking off (LONGCTX_NO_THINK)"}
+# v2.4: long-context settings that change the questions; noted (long-context is never cached and differs a little
+# between runs anyway), not refused
+_NOTE_LONGCTX = {"trials": "LONGCTX_TRIALS", "keys": "LONGCTX_KEYS", "borderline_trials": "LONGCTX_BORDERLINE_TRIALS"}
 
 
 def _load(path):
@@ -124,6 +137,16 @@ def check(docs, labels):
         for k, what in _MUST_MATCH.items():
             if (ev.get(k) or None) != (base_ev.get(k) or None):
                 problems.append(f"{what}: {base_lbl} {base_ev.get(k)!r} vs {lbl} {ev.get(k)!r}")
+        bc, dc = docs[0].get("config") or {}, doc.get("config") or {}
+        for k, what in _MUST_MATCH_CONFIG.items():
+            if k in bc and k in dc and (bc[k] or None) != (dc[k] or None):
+                problems.append(f"{what}: {base_lbl} {bc[k]!r} vs {lbl} {dc[k]!r}")
+        bl, dl = base_ev.get("long_context") or {}, ev.get("long_context") or {}
+        diff = [f"{name} {bl.get(k)!r} vs {dl.get(k)!r}" for k, name in _NOTE_LONGCTX.items()
+                if bl and dl and bl.get(k) != dl.get(k)]
+        if diff:
+            notes.append("long-context questions differ (" + ", ".join(diff) + "): long-context results are not "
+                         "like-for-like")
         a, b = base_ev.get("datasets") or {}, ev.get("datasets") or {}
         if set(a) != set(b):
             only = lambda x, y: ", ".join(EVAL_SPECS.get(k, {}).get("short", k) for k in sorted(set(x) - set(y)))
@@ -138,8 +161,9 @@ def check(docs, labels):
                              " (models with fewer questions than the largest set are not ranked)")
         la, lb = (base_ev.get("long_context") or {}).get("lengths"), (ev.get("long_context") or {}).get("lengths")
         if la != lb:
-            notes.append(f"long-context lengths {la} vs {lb}: the Agent score compares long context over the "
-                         "lengths every ranked model ran")
+            notes.append(f"long-context lengths {la} vs {lb}: each model's long-context part uses the "
+                         "AGENT_LONGCTX_BASIS lengths it ran, so a run without a basis length scores its models "
+                         "on fewer lengths")
         if ev.get("profile") != base_ev.get("profile"):
             notes.append(f"profile {base_ev.get('profile')} vs {ev.get('profile')} (fine if the final question sets "
                          "match; see the question counts)")

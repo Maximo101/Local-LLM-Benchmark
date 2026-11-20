@@ -457,7 +457,10 @@ def _run(args, cfg, stamp, info):
         eval_data = _load_eval_data(cfg)
         try:                                     # one line: what --estimate predicts for this run (never fatal)
             from .estimate import estimate
-            estimate(cfg, brief=True)
+            from .evals.runner import longctx_done
+            done = {m: ("all" if longctx_done(cfg, row, row.get("ctx_size")) else "speed")
+                    for m, row in st.prior.items() if resumable(row, need_speed=not evals_only)}
+            estimate(cfg, brief=True, done=done)   # v2.4: a --resume run keeps the speed rows it already has
         except Exception:
             pass
         if evals_only:
@@ -640,12 +643,20 @@ def _parser():
                     help="rebuild the dashboard from the newest finished run (OUTPUT_DIR/results.json, or the "
                          "given benchmark_<stamp>.json / folder) with the current dashboard code, then exit; "
                          "nothing is benchmarked or rescored (for working on the dashboard)")
+    ap.add_argument("--rescore", nargs="?", const="", metavar="JSON",
+                    help="score a finished run again with this version's scoring (newest run, or the given "
+                         "benchmark_<stamp>.json / folder) and print old vs new ranks; writes rescored_<id>.json and "
+                         "its dashboard; nothing is benchmarked (v2.4)")
+    ap.add_argument("--forget-run", metavar="STAMP",
+                    help="remove one run's files from OUTPUT_DIR (its CSV/JSON/log/dashboards/details/rows file, its "
+                         "history rows; results.json falls back to the newest other run); lists only, unless --force; "
+                         "the result cache is kept (v2.4)")
     ap.add_argument("--compare", nargs="*", metavar="JSON",
                     help="combine finished runs into one dashboard, e.g. a Strata run with a llama-swap run (no "
                          "files: the newest run of each backend in OUTPUT_DIR); scores are re-computed over all models "
                          "together; nothing is benchmarked")
     ap.add_argument("--force", action="store_true",
-                    help="with --compare: combine runs even when their eval settings differ; with a run: start "
+                    help="with --compare: combine runs even when their eval settings differ; with --forget-run: really remove; with a run: start "
                          "although another benchmark run is still going")
     ap.add_argument("--pause", action="store_true",
                     help="ask the run that is going in OUTPUT_DIR to pause: it finishes its current model (speed test) "
@@ -745,6 +756,14 @@ def main():
     if args.compare is not None:
         from .compare import compare_runs
         compare_runs(cfg, args.compare, force=args.force)
+        return
+    if args.forget_run:
+        from .forget import forget_run
+        forget_run(cfg, args.forget_run, force=args.force)
+        return
+    if args.rescore is not None:
+        from .rescore import rescore_run
+        rescore_run(cfg, args.rescore or None)
         return
     if args.reload is not None:
         from .reload import reload_dashboard

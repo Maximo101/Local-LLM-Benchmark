@@ -462,11 +462,13 @@ class Config:
     longctx_kv_action: str = "flag"         # LONGCTX_KV_ACTION: flag | skip, when the model's KV is below LONGCTX_KV_MIN
     longctx_trials: int = 2                 # LONGCTX_TRIALS: prompts per length (different needles and depths)
     longctx_keys: int = 4                   # LONGCTX_KEYS: needles hidden per prompt (all of them are asked for)
+    longctx_borderline_trials: int = 2      # LONGCTX_BORDERLINE_TRIALS (v2.4): extra prompts at a length near AGENT_CTX_PASS_PCT
     longctx_no_think: bool = True           # LONGCTX_NO_THINK: ask with thinking disabled (a pure retrieval test)
     agent_fallback_penalty: float = 10.0    # AGENT_FALLBACK_PENALTY: % of the Agent quality lost if EVERY question was retried
     agent_prefill_ref: float = 4000.0       # AGENT_PREFILL_REF: prefill tok/s that earns the full prefill credit
     agent_ttft_ref: float = 15.0            # AGENT_TTFT_REF: agent-prompt TTFT (s) at which its credit halves
     agent_longctx_weight: float = 0.25      # AGENT_LONGCTX_WEIGHT: share of the Agent composite from long-context retrieval
+    agent_longctx_basis: str = "64k,90k"     # AGENT_LONGCTX_BASIS (v2.4): long-ctx lengths in the composite; "common" = v2.3
     # --- v2.3: Agent score (see llmbench/agent.py) ---
     agent_tool_weight: float = 0.30         # AGENT_TOOL_WEIGHT: share of the Agent composite from tool calling
     agent_ctx_min: int = 65536              # AGENT_CTX_MIN: loaded context below this gets no Agent score (0 = off)
@@ -612,6 +614,29 @@ def _eval_extra_body():
     if not isinstance(obj, dict):
         sys.exit("[config] EVAL_EXTRA_BODY must be a JSON object")
     return obj
+
+
+def _lc_basis(raw):
+    """AGENT_LONGCTX_BASIS (v2.4): "common" (the v2.3 rule: the lengths every ranked model ran), "all" (every length
+    the run tested), or long-context length labels / token counts ("64k,90k", "65536,92160"). Returns the normalised
+    text ("common", "all" or labels in slot order)."""
+    raw = str(raw or "").strip().strip('"').strip("'").lower()
+    if raw in ("common", "all"):
+        return raw
+    labels = []
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        lab = LONGCTX_SLOTS.get(int(part)) if part.isdigit() else (part if part in LONGCTX_SLOTS.values() else None)
+        if lab is None:
+            sys.exit(f"AGENT_LONGCTX_BASIS: {part!r} is not a long-context length "
+                     f"({', '.join(LONGCTX_SLOTS.values())}, their token counts, 'common' or 'all')")
+        labels.append(lab)
+    if not labels:
+        return "64k,90k"
+    order = list(LONGCTX_SLOTS.values())
+    return ",".join(sorted(set(labels), key=order.index))
 
 
 def load_config() -> Config:
@@ -837,11 +862,13 @@ def load_config() -> Config:
         longctx_kv_action=kv_action,
         longctx_trials=max(1, _env("LONGCTX_TRIALS", 2, int)),
         longctx_keys=min(12, max(1, _env("LONGCTX_KEYS", 4, int))),
+        longctx_borderline_trials=min(8, max(0, _env("LONGCTX_BORDERLINE_TRIALS", 2, int))),
         longctx_no_think=_env("LONGCTX_NO_THINK", True, bool),
         agent_fallback_penalty=max(0.0, _env("AGENT_FALLBACK_PENALTY", 10.0, float)),
         agent_prefill_ref=max(10.0, _env("AGENT_PREFILL_REF", 4000.0, float)),
         agent_ttft_ref=max(0.5, _env("AGENT_TTFT_REF", 15.0, float)),
         agent_longctx_weight=min(1.0, max(0.0, _env("AGENT_LONGCTX_WEIGHT", 0.25, float))),
+        agent_longctx_basis=_lc_basis(_env("AGENT_LONGCTX_BASIS", "64k,90k")),
         agent_tool_weight=min(1.0, max(0.0, _env("AGENT_TOOL_WEIGHT", 0.30, float))),
         agent_ctx_min=agent_ctx_min,
         agent_ctx_curve=agent_ctx_curve,

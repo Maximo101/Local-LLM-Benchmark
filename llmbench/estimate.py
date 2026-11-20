@@ -35,7 +35,9 @@ THINKING_SHARE = 0.9          # share of models assumed to think, when nothing i
 AVAILABLE = {"gpqa": 198, "mmlu_pro": 12032, "humaneval": 164, "mbpp": 500, "livecodebench": 1055, "gsm8k": 1319,
              "math": 500, "toolcall": 96}          # tool calling: the built-in pool (v2.3.6; 32 before)
 SANDBOX_S = 1.5               # seconds per program run in Docker (hidden by pipelined grading in v2.1)
-FUNNEL_SURVIVE = 0.5          # share of models assumed to pass each funnel gate (a crowded field keeps more)
+FUNNEL_SURVIVE = 0.85         # share of models assumed to pass each funnel gate when no earlier run says (v2.4:
+                              # was 0.5; the v2.3.3 gate with its margin keeps most of a crowded field: 2026-11-16
+                              # and -19 kept 87-100% at each gate)
 
 
 def _history(cfg):
@@ -255,7 +257,28 @@ def cached_answers(cfg):
     return out
 
 
-def _stage_shape(cfg, n_models):
+def observed_survival(cfg):
+    """v2.4: (share of models that passed a funnel gate, runs it comes from) from the newest finished funnel runs in
+    OUTPUT_DIR (their evaluation.funnel.gates), or (FUNNEL_SURVIVE, 0). Hard-rule models (no Agent score) count as
+    not passing, as in a real run."""
+    kept = total = runs = 0
+    for p in sorted(glob.glob(str(cfg.output_dir / "benchmark_*.json")), key=os.path.getmtime, reverse=True)[:5]:
+        try:
+            with open(p, encoding="utf-8") as fh:
+                gates = ((json.load(fh).get("evaluation") or {}).get("funnel") or {}).get("gates") or []
+        except (OSError, ValueError, AttributeError):
+            continue
+        if not gates:
+            continue
+        runs += 1
+        kept += sum(1 for g in gates if g.get("kept"))
+        total += len(gates)
+        if runs >= 3:
+            break
+    return (kept / total, runs) if total >= 10 else (FUNNEL_SURVIVE, 0)
+
+
+def _stage_shape(cfg, n_models, survive=FUNNEL_SURVIVE):
     """[(cumulative share of the final rows, expected share of models still in)] per stage."""
     if cfg.eval_profile != "funnel":
         return [(1.0, 1.0)]
@@ -264,7 +287,7 @@ def _stage_shape(cfg, n_models):
     alive, out = float(n_models), []
     for _, r in stages:
         out.append(((r if r is not None else 500) / final, alive / max(1, n_models)))
-        alive = max(min(cfg.eval_leaders, n_models), alive * FUNNEL_SURVIVE)
+        alive = max(min(cfg.eval_leaders, n_models), alive * survive)
     return out
 
 
@@ -358,8 +381,11 @@ def stale_builds(cfg, models, history, build=None):
                    if (history.get(m) or {}).get("build_info") and history[m]["build_info"] != build}
 
 
-def estimate(cfg, brief=False):
-    """Print the estimate. brief=True: one line, for the start of a normal run. Returns total seconds or None."""
+def estimate(cfg, brief=False, done=None):
+    """Print the estimate. brief=True: one line, for the start of a normal run. Returns total seconds or None.
+    done (v2.4): {model: "speed" | "all"} for a --resume run: models whose speed test (and long-context) the rows
+    file already holds cost nothing there; "all" = nothing is redone (only cached evals are reused anyway)."""
+    done = done or {}
     cfg = copy(cfg)                              # never change the settings of the run that asked
     history = _history(cfg)
     gains = _probe(cfg)
@@ -373,6 +399,11 @@ def estimate(cfg, brief=False):
                   f"{cfg.output_dir}). Nothing to estimate.")
         return None
     per = {m: estimate_model(cfg, m, history.get(m, {}), bw, gains, history) for m in models}
+    for m, what in done.items():          # v2.4: --resume keeps these models' speed rows (and long-ctx)
+        if m in per:
+            per[m].pop("speed", None)
+            if what == "all":
+                per[m].pop("longctx", None)
     funnel = cfg.eval_profile == "funnel" and cfg.run_eval_tests
     total_full = sum(sum(v for k, v in e.items() if not k.startswith("_")) for e in per.values())
     mode = cache_mode(cfg) if cfg.run_eval_tests else "false"
@@ -383,7 +414,10 @@ def estimate(cfg, brief=False):
     olds = sorted(set(stale.values()))
     stale_txt = (f"llama.cpp build changed ({', '.join(olds)} -> {build}): the result cache will NOT be reused for "
                  f"{len(stale)} of {len(models)} model(s)") if stale else ""
-    shape = _stage_shape(cfg, max(1, sum(1 for m in models if not per[m].get("_skip"))))
+    survive, survive_runs = observed_survival(cfg) if funnel else (FUNNEL_SURVIVE, 0)
+    shape = _stage_shape(cfg, max(1, sum(1 for m in models if not per[m].get("_skip"))), survive)
+    survive_txt = (f"funnel: assumes {survive:.0%} of the models pass each gate"
+                   + (f", as in the last {survive_runs} run(s)" if survive_runs else ""))
     sanity = cfg.eval_sanity_pct / 100 if mode == "true" else 0.0
     total = 0.0
     for m, e in per.items():
@@ -409,7 +443,8 @@ def estimate(cfg, brief=False):
     if brief:
         reused = sum((e.get("_cached") or (0, 0, 0))[0] for e in per.values())
         print(f"Estimated run time: ~{fmt_hr_m_s(total)} for {len(models)} model(s)"
-              + (" (funnel: assumes half the models pass each gate)" if funnel else "")
+              + (f" ({survive_txt})" if funnel else "")
+              + (f"; {len(done)} resumed" if done else "")
               + (f"; {stale_txt}" if stale_txt else "")
               + (f"; ~{reused} answers from the result cache" if reused else
                  "; full re-run (EVAL_RESULT_CACHE=refresh)" if mode == "refresh" else
@@ -443,8 +478,9 @@ def estimate(cfg, brief=False):
         print(f"  {m:<{w}}  {f('speed'):>8}  {f('longctx'):>8}  {f('evals'):>8}" + (f"  {cs:>11}" if show_c else "")
               + f"  {e.get('_notes', '')}")
     reused = sum((e.get("_cached") or (0, 0, 0))[0] for e in per.values())
-    print(f"\n  Total: ~{fmt_hr_m_s(total)}" + (f"  (the funnel assumes {int(FUNNEL_SURVIVE * 100)}% of models pass each "
-                                               f"gate, never fewer than EVAL_LEADERS={cfg.eval_leaders})" if funnel else ""))
+    print(f"\n  Total: ~{fmt_hr_m_s(total)}" + (f"  (the funnel assumes {round(survive * 100)}% of models pass each "
+                                               f"gate{' (as in the last ' + str(survive_runs) + ' run(s))' if survive_runs else ''}"
+                                               f", never fewer than EVAL_LEADERS={cfg.eval_leaders})" if funnel else ""))
     if show_c:
         print(f"  cached = answers expected to be reused / questions expected to be asked"
               + (" (+ ~sanity re-asks)" if sanity else "") + (f"; {reused} reused in all" if reused else "; nothing "

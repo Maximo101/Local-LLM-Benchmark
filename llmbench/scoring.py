@@ -395,8 +395,8 @@ def _fill_agent_scores_core(results, cfg):
 
     score_agent = credit(composite -> tie zone -> quadratic fall-off) x retry_keep x ctx_factor x (1 - W + W x speed)
 
-    1. Composite quality (agent.py): evals / tool calling / long-ctx over the lengths every ranked model ran
-       (AGENT_TOOL_WEIGHT, AGENT_LONGCTX_WEIGHT; the evals get the rest). Anything within the composite's noise
+    1. Composite quality (agent.py): evals / tool calling / long-ctx over AGENT_LONGCTX_BASIS, each model on the
+       basis lengths its context fits (v2.4; v2.3: the lengths every ranked model ran) (AGENT_TOOL_WEIGHT, AGENT_LONGCTX_WEIGHT; the evals get the rest). Anything within the composite's noise
        (1 standard error of the best model, or AGENT_ACC_TOL) of the best is a tie at 100; below that the credit
        falls steeply (quadratic, 0 at AGENT_ACC_SPAN points under the tie zone).
     2. After the tie zone, so they separate tied models too: the retry penalty
@@ -446,11 +446,15 @@ def _fill_agent_scores_core(results, cfg):
             r["_q"], r["_se"] = c
             r["agent_composite_pct"] = c[0]
             if b["lengths"]:
-                lc = agent.lc_results(r)
-                r["agent_longctx_pct"] = sum(lc[l] for l in b["lengths"]) / len(b["lengths"])
+                r["agent_longctx_pct"] = agent.lc_value(r, b["lengths"])
         if not pool:
             return
         ranked = [r for r in pool if r["eligible"]] or pool       # the bar is the best model that can actually be used
+        if b["lengths"] and len(b["lengths"]) > 1:
+            # v2.4: a model judged on fewer basis lengths (its context fits only 64k) took an easier long-ctx test, so
+            # it does not set the bar while models judged on every basis length are there
+            full = [r for r in ranked if len(agent.row_lengths(r, b["lengths"])) == len(b["lengths"])]
+            ranked = full or ranked
         best = max(ranked, key=lambda r: r["_q"])
         tol = agent_tolerance(best, cfg)
         for r in pool:

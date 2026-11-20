@@ -143,6 +143,16 @@ def haystack_tpw(tpw):
     return math.ceil((tpw or 1.25) * 50 - 1e-9) / 50
 
 
+def borderline(hits, asked, pass_pct):
+    """v2.4: True when a long-context result is within one retrieval of the pass mark: it failed by one code or
+    passed with none to spare (8 codes, 75%: 5/8 and 6/8). One code more or less would flip the usable context there,
+    so the model is asked LONGCTX_BORDERLINE_TRIALS more questions before the result stands."""
+    if not asked or not pass_pct:
+        return False
+    need = pass_pct / 100 * asked
+    return need - 1 <= hits < need + 1 - 1e-9
+
+
 def run_longctx(cfg, session, r, ctx, sink=None):
     """Fill r['longctx_<len>_pct'], r['longctx_kv_ok'], r['longctx_note'] (and deferred prefill_<len>_tps).
     Blocking (call from a thread)."""
@@ -170,11 +180,15 @@ def run_longctx(cfg, session, r, ctx, sink=None):
         if ctx and n >= ctx:
             target = ctx - max(1024, int(0.03 * ctx))
         trials, keys = cfg.longctx_trials, cfg.longctx_keys
+        extra = getattr(cfg, "longctx_borderline_trials", 0)
+        pass_pct = getattr(cfg, "agent_ctx_pass_pct", 75.0)
         timeout = max(cfg.eval_timeout, n / 100 + 120)
         scores, toks, cached, t0 = [], [], [], now()
         first, retried = None, False
         for attempt in range(2):            # one rebuild if the server still says the prompt is too long
-            doc, needles, decoys = build_haystack(target, tpw, trials * keys, f"{cfg.eval_seed}:{n}")
+            # v2.4: the needles of the borderline questions are always in the document, so it is the same document
+            # whether or not they are asked.
+            doc, needles, decoys = build_haystack(target, tpw, (trials + extra) * keys, f"{cfg.eval_seed}:{n}")
             names = list(needles)
             try:
                 first = _ask(cfg, session, model, doc + question(names[:keys]), timeout)
@@ -190,7 +204,9 @@ def run_longctx(cfg, session, r, ctx, sink=None):
                 break
         if first is None:
             continue
-        for trial in range(trials):
+        probed = False
+        trial = 0
+        while trial < trials + (extra if probed else 0):
             ask_names = names[trial * keys:(trial + 1) * keys]
             asked = {k: needles[k] for k in ask_names}
             others = {**decoys, **{k: v for k, v in needles.items() if k not in asked}}
@@ -227,11 +243,18 @@ def run_longctx(cfg, session, r, ctx, sink=None):
                 sink({"model": model, "dataset": "longctx", "id": f"longctx-{label}-{trial}", "correct": s == 1.0,
                       "score": s, "prompt_tokens": used, "cache_n": timings.get("cache_n"), "asked": asked,
                       "thinking_retry": bool(timings.get("thinking_retry")), "response": text[:1000]})
+            trial += 1
+            if trial == trials and extra and not probed and borderline(round(sum(scores) * keys), len(scores) * keys,
+                                                                       pass_pct):
+                probed = True
+                notes.append(f"{label}: {round(sum(scores) * keys)}/{len(scores) * keys} is within one code of "
+                             f"{pass_pct:g}%, asked {extra * keys} more")
         if retried:
             notes.append(f"{label}: thinking used the whole 400-token reply, asked again with "
                          f"{THINKING_RETRY_TOKENS:,} tokens (the model ignores enable_thinking=false)")
         if scores:
             r[f"longctx_{label}_pct"] = 100 * avg(scores)
+            r[f"longctx_{label}_n"] = len(scores) * keys
             k = f"{avg(toks) / 1024:.0f}k tok" if toks else "? tok"
             reuse = f", prefix reused {max(cached) / 1024:.0f}k" if cached and max(cached) > 1024 else ""
             print(f"    Long-ctx   {label:<4} {100 * avg(scores):5.1f}%  ({len(scores)} x {keys} keys, {k}, "

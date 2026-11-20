@@ -80,7 +80,9 @@ _GROUPS = {
                 # v2.3: prefill at depth
                 "prefill_depth_tps", "prefill_depth_ttft_s", "prefill_depth_tokens", "prefill_depth_new"],
     "long_context": ["longctx_32k_pct", "longctx_64k_pct", "longctx_90k_pct", "longctx_128k_pct", "longctx_avg_pct", "longctx_kv_ok",
-                     "longctx_note"],
+                     "longctx_note",
+                     # v2.4: retrievals asked per length (more when a result was near the pass mark)
+                     "longctx_32k_n", "longctx_64k_n", "longctx_90k_n", "longctx_128k_n"],
     "budget": ["budget_profile", "budget_pass", "budget_fails", "budget"],
 }
 _TOP = {"model", "status", "error", "timestamp"}
@@ -200,6 +202,7 @@ def build_report(results, cfg, info):
                         "margin_of_error": margin_of_error(cfg, results),
                         "long_context": ({"lengths": list(cfg.longctx_lengths), "trials": cfg.longctx_trials,
                                           "keys": cfg.longctx_keys, "kv_min": cfg.longctx_kv_min,
+                                          "borderline_trials": cfg.longctx_borderline_trials,
                                           "kv_action": cfg.longctx_kv_action} if cfg.eval_longctx else None),
                         "datasets": datasets} if datasets else {"enabled": False, "datasets": {}}),
         "budget": cfg.budget,
